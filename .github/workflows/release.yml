@@ -88,10 +88,19 @@ jobs:
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
+          # Docker's classic image store cannot load two architectures under
+          # the same index digest. Pull each platform's child manifest instead.
+          index=$(docker buildx imagetools inspect --raw "$IMAGE@$DIGEST")
           for platform in linux/amd64 linux/arm64; do
+            platform_digest=$(jq -er --arg arch "${platform#linux/}" '
+              .manifests
+              | map(select(.platform.os == "linux" and .platform.architecture == $arch))
+              | if length == 1 then .[0].digest
+                else error("Expected exactly one image manifest for " + $arch) end
+            ' <<< "$index")
             docker run --rm --platform "$platform" \
               -v "$PWD/.github/scripts/smoke.sh:/tmp/smoke.sh:ro" \
-              "$IMAGE@$DIGEST" sh /tmp/smoke.sh
+              "$IMAGE@$platform_digest" sh /tmp/smoke.sh
           done
 
       - name: Promote tested manifest to latest
