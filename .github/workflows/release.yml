@@ -1,0 +1,104 @@
+name: Publish CI tools image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Git tags are the version counter; never cancel a partially published release.
+concurrency:
+  group: ci-tools-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reject obsolete release commits
+        shell: bash
+        run: |
+          git fetch origin main --tags
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+            echo 'Refusing to publish an older commit as latest. Run the workflow on main.' >&2
+            exit 1
+          fi
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: amd64,arm64
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build native tools for validation and versioning
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          pull: true
+          no-cache: true
+          tags: ci-utils:smoke
+
+      - name: Smoke-test native tools
+        run: |
+          docker run --rm -v "$PWD/.github/scripts/smoke.sh:/tmp/smoke.sh:ro" \
+            ci-utils:smoke sh /tmp/smoke.sh
+
+      - name: Assign and push release version
+        id: version
+        run: bash .github/scripts/version.sh
+
+      - name: Determine image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish versioned multi-platform image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
+      - name: Smoke-test both published platforms
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            docker run --rm --platform "$platform" \
+              -v "$PWD/.github/scripts/smoke.sh:/tmp/smoke.sh:ro" \
+              "$IMAGE@$DIGEST" sh /tmp/smoke.sh
+          done
+
+      - name: Promote tested manifest to latest
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+          echo "Published \`$IMAGE:$VERSION\` and \`$IMAGE:latest\` ($DIGEST)." >> "$GITHUB_STEP_SUMMARY"
