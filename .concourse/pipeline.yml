@@ -1,0 +1,27 @@
+resources:
+  - name: source
+    type: git
+    source:
+      uri: ((repository-url))
+      branch: ((release-branch))
+      # Also works for private GitHub repositories.
+      username: x-access-token
+      password: ((github-token))
+
+jobs:
+  - name: release
+    serial: true
+    build_log_retention: {builds: 20}
+    plan:
+      - get: source
+        trigger: true
+      - task: build-and-publish
+        privileged: true
+        timeout: 90m
+        file: source/.concourse/tasks/release.yml
+        params:
+          IMAGE: ghcr.io/((ghcr-owner))/concourse-revsys-utils
+          GHCR_USERNAME: ((ghcr-username))
+          GHCR_TOKEN: ((ghcr-token))
+          GITHUB_TOKEN: ((github-token))
+          REPOSITORY_URL: ((repository-url))
